@@ -1,0 +1,415 @@
+## Загрузка данных в R
+
+```{r, eval = FALSE, warning=FALSE}
+install.packages("factoextra")
+install.packages("devtools")
+install.packages("NbClust")
+```
+
+Поставим пакет Томаса:
+
+```{r, eval = FALSE, warning=FALSE}
+devtools::install_github('thomasp85/patchwork')
+# devtools::install_github("hadley/multidplyr")
+```
+
+### Подключим необходимые пакеты
+
+```{r, eval = FALSE, warning=FALSE}
+library(tidyverse) # обработка данных, графики...
+library(skimr) # описательные статистики
+library(rio) # импорт фантастического количества форматов данных
+library(cluster) # кластерный анализ
+library(factoextra) # визуализации kmeans, pca
+library(dendextend) # визуализация дендрограмм
+library(corrplot) # визуализация корреляций
+library(broom) # метла превращает результаты оценивания моделей в таблички
+library(naniar) # визуализация пропущенных значений
+library(visdat) # визуализация пропущенных значений
+library(patchwork) # удобное расположение графиков рядом
+library(factoextra) # визуализации kmeans, pca
+library(corrplot) # визуализация корреляций
+
+library(lmtest)
+library(psych)
+library(NbClust)
+library(ggplot2)
+library(pvclust)
+library(vegan)
+```
+
+```{r}
+Sys.setlocale("LC_ALL","Russian")
+```
+
+### Описание начальных данных
+
+
+```{r}
+df <- read.csv("data/l1_data.csv", sep = ",", header = TRUE)
+```
+
+
+```{r}
+# очистка от пропущенных значений
+# df <- na.omit(df)
+# glimpse(df)
+```
+
+```{r}
+head(df)
+```
+
+```{r}
+str(df)
+```
+
+```{r}
+summary(df)
+```
+
+Выберем переменные, на основе которых мы будем кластеризовать
+
+```{r, message = FALSE, warning=FALSE}
+to_clust <- data.frame("salary" = as.integer(df$salary),
+                 "education" = as.integer(df$education),
+                  "experience" = as.integer(df$experience))
+```
+
+```{r}
+head(to_clust)
+```
+
+
+```{r}
+salary=to_clust$salary
+experience=to_clust$experience
+education=to_clust$education
+```
+
+### Таблица с описательными статистиками
+
+Для построения таблицы с описательными статистиками используем команду `describe`,
+столбцы skew нам не надо.
+
+```{r message=FALSE, warning=FALSE}
+library(psych)
+describe(to_clust, skew=FALSE, ranges=TRUE)
+```
+
+### Графики
+
+```{r, message=FALSE, warning=FALSE}
+hist(salary, main='Гистограмма по доходу', xlab='доход', ylab='частота',
+     breaks = 50, freq = FALSE, col = "lightblue")
+lines(density(salary), col = "red", lwd = 2)
+# lines(density(df$salary, bw = 0.2), col = "blue", lwd = 2)
+
+hist(education, main='Гистограмма по образованию', xlab='образование', ylab='частота',
+     breaks = 50, freq = FALSE, col = "lightblue")
+lines(density(education), col = "red", lwd = 2)
+lines(density(education, bw = 0.2), col = "blue", lwd = 2)
+
+hist(experience, main='Гистограмма по стажу', xlab='стаж', ylab='частота',
+     breaks = 50, freq = FALSE, col = "lightblue")
+lines(density(experience), col = "red", lwd = 2)
+# lines(density(df$experience, bw = 0.2), col = "blue", lwd = 2)
+```
+
+```{r}
+# диаграммы рассеяния
+library(ggplot2)
+qplot(data = to_clust, education, salary)
+qplot(data = to_clust, experience, salary)
+```
+
+### Проверка на выбросы
+
+```{r}
+boxplot(salary)
+boxplot(experience)
+boxplot(education)
+```
+
+Заберём индексы точек выбросов
+
+```{r}
+ind_sal <- which(salary %in% boxplot.stats(salary)$out)
+ind_exp <- which(experience %in% boxplot.stats(experience)$out)
+ind_ed <- which(education %in% boxplot.stats(education)$out)
+```
+
+Сохраним координаты точек выбросов в отдельном dataframe
+
+```{r}
+outliers_sal <- data.frame(salary[ind_sal])
+outliers_exp <- data.frame(experience[ind_exp])
+outliers_ed <- data.frame(education[ind_ed])
+```
+
+
+### Построение модели
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+library(lmtest)
+model <- lm(salary ~ experience + education, data=to_clust)
+coeftest(model)
+```
+
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+s = summary(model)
+s
+```
+
+Еще раз убедимся в значимости выбранных регрессоров.
+
+```{r}
+library(corrplot) # визуализация корреляций
+salary_cor <- cor(df)
+corrplot(salary_cor)
+```
+
+```{r}
+salary_fit <- corr.test(to_clust)
+salary_fit$r # сами значения корреляций
+salary_fit$p # по уровню значимости для каждой пары, расчитанные с поправкой на множественное сравнение
+```
+
+## Иерархический кластерный анализ
+
+
+```{r}
+salary_dist <- dist(scale(to_clust, center = TRUE, scale = TRUE), method = 'euclidian')
+```
+
+Полученную матрицу расстояний можно передадать функции `hclust()`, которая кластеризует данные. Однако в пакете `factoextra` есть функция `hcut()`, которая работает с исходными данными. Будем использовать её и попросим выделить кластера в аргументе `k`.
+
+Назначим количество кластеров 6
+
+```{r}
+clasters_count <- 6;
+```
+
+Построим диаграммы рассеивания.
+
+```{r}
+library(stats)
+d <- dist(to_clust, method = "euclidean")
+res.hc <- hclust(d, method = "average")
+clusters <- cutree(res.hc, k = clasters_count)
+plot(to_clust, col = clusters)
+```
+
+
+```{r}
+library(stats)
+d <- dist(to_clust, method = "euclidean")
+res.hc <- hclust(d, method = "ward.D2")
+clusters <- cutree(res.hc, k = clasters_count)
+plot(to_clust, col = clusters)
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+С помощью функции `fviz_dend` визуализируем результат кластеризации. Существует много способов построения дендрограмм, в данной работе будем использовать метод Варда.
+
+
+```{r}
+library(factoextra)
+salary_hcl <- hcut(to_clust, k = clasters_count, hc_method = "ward.D2")
+```
+
+
+```{r}
+fviz_dend(salary_hcl, cex = 0.5, show_labels = F, color_labels_by_k = F) # цвет подписей по группам
+```
+
+Выявленные кластеры можно добавить к исходным данным
+
+```{r}
+library(plyr)
+library(tibble)
+to_clust2 <- mutate(to_clust, cluster = salary_hcl$cluster)
+glimpse(to_clust2)
+```
+
+Отмасштабируем данные с помощью встроенной функции `scale()`.
+
+```{r}
+library(dplyr)
+library(skimr)
+to_clust_stand <- mutate_if(to_clust, is.numeric, ~ as.vector(scale(.)))
+skim(to_clust_stand)
+```
+
+
+## Оценка качества кластеризации
+
+Кофенетическую корреляцию можно также рассчитать между исходной матрицей дистанции и матрицей кофенетических расстояний, и тогда она может служить мерой адекватности кластерного решения исходным данным. Оценим по этому показателю шесть иерархических кластеризаций предыдущем разделе 
+
+```{r message=FALSE, warning=FALSE}
+d <- dist(to_clust, method = "euclidean")
+library(vegan)
+hc_list <- list(hc1 <- hclust(d,"com"),
+                hc2 <-  hclust(d,"single"), hc3 <-  hclust(d,"ave"),
+                hc4 <-  hclust(d, "centroid"), hc5 <- hclust(d, "ward.D"), hc6 <- hclust(d, "ward.D2"))
+Coph <- rbind(
+    MantelStat <- unlist(lapply(hc_list, 
+                                function(hc) mantel(d, cophenetic(hc))$statistic)),
+    MantelP <- unlist(lapply(hc_list, 
+                             function(hc) mantel(d, cophenetic(hc))$signif)))
+colnames(Coph) <- c("Complete", "Single", "Average", "Centroid", "Ward.D", "Ward.D2") 
+rownames(Coph) <- c("W Мантеля", "Р-значение")
+round(Coph, 3)
+```
+
+Таким образом, максимальное значение коэффициента W матричной корреляции Мантеля (а, следовательно, и наибольшая адекватность матрице расстояний, построенной по исходным данным) принадлежит кластеризации по методу средней связи - Average.
+
+
+```{r}
+library(pvclust)
+set.seed(123)
+#  Бутстреп деревьев и расчет BP- и AU- вероятностей для узлов
+t <- pvclust(df, nboot = 100, method.dist = "cor", 
+                     method.hclust = "average", quiet = TRUE)
+plot(t)  # дендрограмма с p-значениями
+pvrect(t) # выделение боксами достоверных фрагментов
+```
+
+Заметно, что признаки образуют кластеры с ясно интерпретируемой зависимостью, но иногда их связь нуждается в дополнительном осмыслении.
+
+### Оценка кластеризации: содержательно
+
+Теперь посмотрим на каждый кластер в отдельности -- будем выбирать из базы строки, где значения `cluster` равны то 1, то 2, и так далее, а потом оценивать содержательно, насколько разумными у нас получились кластеры. Воспользуемся функцией `filter()` из библиотеки `dplyr`. 
+
+```{r, message=FALSE, warning=FALSE}
+#to_clust2 %>% filter(cluster == 1) %>% View
+#to_clust2 %>% filter(cluster == 2) %>% View
+#to_clust2 %>% filter(cluster == 3) %>% View
+#to_clust2 %>% filter(cluster == 4) %>% View
+#to_clust2 %>% filter(cluster == 5) %>% View
+#to_clust2 %>% filter(cluster == 6) %>% View
+```
+
+
+### Оценка кластеризации: визуально
+
+Посмотрим на описательные статистики по группам (кластерам), точнее, на средние значения разных переменных по группам. Сначала сгруппируем данные по переменной `cluster`, то есть по кластерам. Потом запросим описательные статистики по конкретным переменным (общая функция для описательных статистик -- `summarise`, но мы используем `summarise_at`, так как нас интересуют определенные столбцы). Перечисляем нужные переменные в `.vars = vars()`, а нужные статистики в `.funs = funs()`. Дальше хотим посмотреть на полученную таблицу в отдельном окне -- `View`.
+
+```{r}
+to_clust2 %>% group_by(cluster) %>% 
+  summarise_at(.vars = vars(ends_with("salary")), .funs = funs(mean)) %>% 
+  View 
+```
+
+
+```{r}
+to_clust2 %>% group_by(cluster) %>% 
+  summarise_at(.vars = vars(ends_with("experience")), .funs = funs(mean)) %>% 
+  View
+```
+
+
+```{r}
+to_clust2 %>% group_by(cluster) %>% 
+  summarise_at(.vars = vars(ends_with("education")), .funs = funs(mean)) %>% 
+  View
+```
+
+Видно, что средние значения показателей по группам отличаются.
+
+А теперь посмотрим на распределения разных переменных по кластерам и проверим, правда ли, что они отличаются. Начнем с явки. Построим "ящики с усами" -- для этого нам понадобится библиотека `ggplot2`. 
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(data = to_clust2, aes(x = "", y = salary)) + geom_boxplot() + facet_grid(~cluster)
+# ggplot(data = to_clust2, aes(x = "", y = experience)) + geom_boxplot() + facet_grid(~cluster)
+# ggplot(data = to_clust2, aes(x = "", y = education)) + geom_boxplot() + facet_grid(~cluster)
+```
+
+Как можно заметить, распределения зарплат в разных кластерах не похожи друг на друга: отличаются не только медианные значения, но и разброс значений. Однако стоит помнить, что "ящики с усами" наиболее информативны в случае, когда распределение данных нормальное или близко к нормальному. 
+
+Посмотрим теперь на скрипичные диаграммы (*violin plots*) для зарплат (в `aes()` мы добавили `fill = cluster`, чтобы графики были разноцветными, в зависимости от кластера):
+
+```{r}
+ggplot(data = to_clust2) + 
+  geom_violin(aes(x = "", y = salary, fill = factor(cluster))) +
+  #geom_boxplot(aes(x = "", y = salary, fill = factor(cluster), width = 0.2, outlier.colour = NA)) #+
+  facet_grid(~cluster)
+```
+
+Можно еще построить гистограммы:
+
+```{r}
+# fill - цвет заливки
+# col - цвет границ графика, общий для всех кластеров
+# bins - число интервалов (столбцов) в гистограмме
+ggplot(data = to_clust2, aes(x = salary , fill = cluster)) + geom_histogram(bins = 6, col = "black") + facet_grid(~cluster)
+```
+
+Посмотрим на диаграммы рассеяния для пар показателей и выделять точки, относящиеся к разным кластерам, разным цветом.
+
+```{r, warning=FALSE, message=FALSE}
+ggplot(data = to_clust2, aes(x = salary, y = education, color = cluster)) + geom_point() + 
+    scale_colour_gradientn(colours=rainbow(4))
+ggplot(data = to_clust2, aes(x = education, y = salary, color = cluster)) + geom_point() + 
+    scale_colour_gradientn(colours=rainbow(4))
+ggplot(data = to_clust2, aes(x = salary, y = experience, color = cluster)) + geom_point() + 
+    scale_colour_gradientn(colours=rainbow(4))
+ggplot(data = to_clust2, aes(x = experience, y = salary, color = cluster)) + geom_point() + 
+    scale_colour_gradientn(colours=rainbow(4))
+```
+
+Кажется, кластеры получились достаточно логичными.
+
+### Оптимальное количество кластеров
+
+
+```{r, message=FALSE, warning=FALSE}
+# geom_vline - добавить вертикальную линию
+fviz_nbclust(to_clust, kmeans, method = "wss") +
+  labs(subtitle = "Elbow method") +
+  geom_vline(xintercept = 2, linetype = 2)
+```
+
+**Silhouette method** ("силуэтный метод").
+
+```{r, message=FALSE, warning=FALSE}
+fviz_nbclust(to_clust, kmeans, method = "silhouette") +
+  labs(subtitle = "Silhouette method")
+```
+
+И опять мы получаем 2 кластера.
+
+
+### Дополнение: NbClust
+
+`Nbclust` включает 30 разных методов нахождения оптимального числа кластеров, и выдает результат, за который проголосовали большинство методов (*majority rule*).
+
+
+```{r, message=FALSE, warning=FALSE}
+library(NbClust)
+res <- NbClust(to_clust, min.nc = 2, max.nc = 10, method = "kmeans")
+```
+
+Все результаты (все 30 методов):
+
+```{r}
+res$Best.nc
+```
+
+Число кластеров, выбраное большинством методов:
+
+```{r}
+fviz_nbclust(res)
+```
+
+Все-таки 2. Или 6 в крайнем случае.
+
